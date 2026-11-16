@@ -40,18 +40,57 @@ reason (короткая понятная причина). Сохраните и
 """
 
 import asyncio
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 
 async def recommend_price(fetch_offers, current_price, min_price, timeout_s=2.0):
-    result = await fetch_offers()
-    prices = [
-        float(offer["price"])
-        for offer in result["offers"]
-        if offer["delivery_days"] <= 6
-    ]
-    price = round(min(prices) * 0.985, 2)
-    return {"price": price, "decision": "APPLY", "reason": "Найдена минимальная цена"}
+    def hold(reason):
+        return {
+            "price": current_price,
+            "decision": "HOLD",
+            "reason": reason,
+        }
+
+    try:
+        result = await asyncio.wait_for(fetch_offers(), timeout=timeout_s)
+    except TimeoutError:
+        return hold("Источник не ответил вовремя")
+    except Exception:
+        return hold("Источник недоступен")
+
+    if result["status"] != "success":
+        return hold("Источник вернул неполные данные или ошибку")
+
+    def is_suitable_offer(offer):
+        delivery_days = offer["delivery_days"]
+
+        return (
+            delivery_days is not None
+            and delivery_days <= 6
+            and offer["seller"].casefold() != "myshop"
+        )
+
+    prices = [offer["price"] for offer in result["offers"] if is_suitable_offer(offer)]
+    if not prices:
+        return hold("Нет подходящих предложений конкурентов")
+
+    competitor_price = (min(prices) * Decimal("0.985")).quantize(
+        Decimal("0.01"), rounding=ROUND_DOWN
+    )
+    price = max(competitor_price, min_price)
+
+    if abs(price - current_price) > current_price * Decimal("0.30"):
+        return {
+            "price": price,
+            "decision": "REVIEW",
+            "reason": "Изменение цены превышает 30%",
+        }
+
+    return {
+        "price": price,
+        "decision": "APPLY",
+        "reason": "Найдена минимальная цена",
+    }
 
 
 async def sample_fetch_offers():
